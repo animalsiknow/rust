@@ -1,0 +1,95 @@
+steps:
+# FIXME: are these still needed?
+# - bash: |
+#     set -x
+#     git submodule
+#     export SUBMODULES_EXCLUDES=$(git submodule | grep -Eow 'src/[^ ]+' | sed 's/\(.*\)/--exclude=\1\/\.git/')
+#     echo "##vso[task.setvariable variable=SUBMODULES_EXCLUDES;]$SUBMODULES_EXCLUDES"
+#
+# - script: |
+#     REM echo hack as drive D is too small
+#     IF NOT "%DISABLE_DISK_SPACE_HACK%"=="1" (
+#       mkdir c:\MORE_SPACE
+#       mklink /J build c:\MORE_SPACE
+#     )
+
+- script: |
+    set MSYS_PATH=%CD%\citools\msys64
+    choco install msys2 --params="/InstallDir:%MSYS_PATH% /NoPath" -y
+    set PATH=%MSYS_PATH%\usr\bin;%PATH%
+    pacman -S --noconfirm --needed base-devel ca-certificates make diffutils tar
+    IF "%MINGW_URL%"=="" (
+      IF "%MSYS_BITS%"=="32" pacman -S --noconfirm --needed mingw-w64-i686-toolchain mingw-w64-i686-cmake mingw-w64-i686-gcc mingw-w64-i686-python2
+      IF "%MSYS_BITS%"=="64" pacman -S --noconfirm --needed mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-gcc mingw-w64-x86_64-python2
+    )
+    where rev
+    rev --help
+    where make
+
+    echo ##vso[task.setvariable variable=MSYS_PATH]%MSYS_PATH%
+    echo ##vso[task.prependpath]%MSYS_PATH%\usr\bin
+  displayName: Install msys2
+  condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'))
+
+# If we need to download a custom MinGW, do so here and set the path
+# appropriately.
+#
+# Note that this *also* means that we're not using what is typically
+# /mingw32/bin/python2.7.exe, which is a "correct" python interpreter where
+# /usr/bin/python2.7.exe is not. To ensure we use the right interpreter we
+# move `C:\Python27` ahead in PATH and then also make sure the `python2.7.exe`
+# file exists in there (which it doesn't by default).
+- script: |
+    powershell -Command "iwr -outf %MINGW_ARCHIVE% %MINGW_URL%/%MINGW_ARCHIVE%"
+    7z x -y %MINGW_ARCHIVE% > nul
+    echo ##vso[task.prependpath]%CD%\%MINGW_DIR%\bin
+  condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'), ne(variables['MINGW_URL'],''))
+  displayName: Download custom MinGW
+
+# Here we do a pretty heinous thing which is to mangle the MinGW installation
+# we just had above. Currently, as of this writing, we're using MinGW-w64
+# builds of gcc, and that's currently at 6.3.0. We use 6.3.0 as it appears to
+# be the first version which contains a fix for #40546, builds randomly
+# failing during LLVM due to ar.exe/ranlib.exe failures.
+#
+# Unfortunately, though, 6.3.0 *also* is the first version of MinGW-w64 builds
+# to contain a regression in gdb (#40184). As a result if we were to use the
+# gdb provided (7.11.1) then we would fail all debuginfo tests.
+#
+# In order to fix spurious failures (pretty high priority) we use 6.3.0. To
+# avoid disabling gdb tests we download an *old* version of gdb, specifically
+# that found inside the 6.2.0 distribution. We then overwrite the 6.3.0 gdb
+# with the 6.2.0 gdb to get tests passing.
+#
+# Note that we don't literally overwrite the gdb.exe binary because it appears
+# to just use gdborig.exe, so that's the binary we deal with instead.
+- script: |
+    echo ON
+    powershell -Command "iwr -outf 2017-04-20-%MSYS_BITS%bit-gdborig.exe %MINGW_URL%/2017-04-20-%MSYS_BITS%bit-gdborig.exe"
+    mv 2017-04-20-%MSYS_BITS%bit-gdborig.exe %MINGW_DIR%\bin\gdborig.exe
+  condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'), ne(variables['MINGW_URL'],''))
+  displayName: Override with 6.3.0 gdb with 6.2.0 gdb
+
+# Otherwise pull in the MinGW installed on appveyor
+- script: |
+    echo ##vso[task.prependpath]%MSYS_PATH%\mingw%MSYS_BITS%\bin
+  condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'), eq(variables['MINGW_URL'],''))
+  displayName: Add MinGW to path
+
+- script: |
+    copy C:\Python27amd64\python.exe C:\Python27amd64\python2.7.exe
+    echo ##vso[task.prependpath]C:\Python27amd64
+  displayName: Prefer the "native" Python as LLVM has trouble building with MSYS sometimes
+  condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'))
+
+# Note that this is originally from the github releases patch of Ninja
+- script: |
+    md ninja
+    powershell -Command "iwr -outf 2017-03-15-ninja-win.zip https://s3-us-west-1.amazonaws.com/rust-lang-ci2/rust-ci-mirror/2017-03-15-ninja-win.zip"
+    7z x -oninja 2017-03-15-ninja-win.zip
+    del 2017-03-15-ninja-win.zip
+    set RUST_CONFIGURE_ARGS=%RUST_CONFIGURE_ARGS% --enable-ninja
+    echo ##vso[task.setvariable variable=RUST_CONFIGURE_ARGS]%RUST_CONFIGURE_ARGS%
+    echo ##vso[task.prependpath]%CD%\ninja
+  displayName: Download and install ninja
+  condition: and(succeeded(), eq(variables['Agent.OS'], 'Windows_NT'))
